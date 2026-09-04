@@ -157,11 +157,14 @@ function Dashboard({ userId, onSignOut }) {
     for (const e of filtered) {
       revenue += e.revenue;
       let dayExp = 0;
+      let daySaving = 0;
       const catRow = { date: e.date };
       for (const x of e.expenses || []) {
         byCategory[x.category] = (byCategory[x.category] || 0) + x.amount;
         catRow[x.category] = (catRow[x.category] || 0) + x.amount;
-        if (!PERSONAL_CATEGORIES.includes(x.category)) {
+        if (x.category === "Накопление") {
+          daySaving += x.amount;
+        } else if (!PERSONAL_CATEGORIES.includes(x.category)) {
           businessExpenses += x.amount;
           dayExp += x.amount;
         }
@@ -169,10 +172,11 @@ function Dashboard({ userId, onSignOut }) {
       const tax = e.revenue * (settings.taxRate / 100);
       if (tax) catRow["Налог"] = tax;
       categorySeries.push(catRow);
-      byDate[e.date] = { date: e.date, revenue: e.revenue, net: e.revenue - dayExp - tax };
+      byDate[e.date] = { date: e.date, revenue: e.revenue, net: e.revenue - dayExp - tax - daySaving };
     }
     const taxReserve = revenue * (settings.taxRate / 100);
-    const net = revenue - businessExpenses - taxReserve;
+    const savingsAmount = byCategory["Накопление"] || 0;
+    const net = revenue - businessExpenses - taxReserve - savingsAmount;
     const series = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
     const pie = Object.entries(byCategory).map(([name, value]) => ({ name, value }));
     if (taxReserve > 0) pie.push({ name: "Налог", value: taxReserve });
@@ -185,8 +189,7 @@ function Dashboard({ userId, onSignOut }) {
     const personalWithdrawals = PERSONAL_CATEGORIES
       .map((name) => ({ name, value: byCategory[name] || 0 }))
       .filter((x) => x.value !== 0);
-    if (byCategory["Накопление"] > 0) personalWithdrawals.push({ name: "Накопление", value: byCategory["Накопление"] });
-    return { revenue, expenses: businessExpenses, taxReserve, net, series, pie, categorySeries: categorySeries.sort((a, b) => a.date.localeCompare(b.date)), categoryNames, personalWithdrawals };
+    return { revenue, expenses: businessExpenses, taxReserve, savingsAmount, net, series, pie, categorySeries: categorySeries.sort((a, b) => a.date.localeCompare(b.date)), categoryNames, personalWithdrawals };
   }, [filtered, settings.taxRate, start, end]);
 
   const distribution = useMemo(() => {
@@ -377,10 +380,11 @@ function Dashboard({ userId, onSignOut }) {
 
       {tab === "dashboard" && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 12, marginBottom: "1.5rem" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0,1fr))", gap: 12, marginBottom: "1.5rem" }}>
             <StatCard icon={<TrendingUp size={16} color={GREEN} />} label="Выручка" value={stats.revenue} />
             <StatCard icon={<Wallet size={16} color={RUST} />} label="Расходы" value={stats.expenses} />
             <StatCard icon={<Landmark size={16} color={GOLD} />} label="Налог (резерв)" value={stats.taxReserve} />
+            <StatCard icon={<PiggyBank size={16} color={NAVY} />} label="Накопление" value={stats.savingsAmount} />
             <StatCard icon={<PiggyBank size={16} color={NAVY} />} label="Доход" value={stats.net} bold />
           </div>
 
@@ -448,7 +452,7 @@ function Dashboard({ userId, onSignOut }) {
           {stats.personalWithdrawals.length > 0 && (
             <div style={{ background: "#fff", border: "1px solid #e8e5da", borderRadius: 8, padding: "1rem 1.25rem", marginBottom: "1.5rem" }}>
               <h3 style={{ fontSize: 14, fontWeight: 500, margin: "0 0 8px" }}>Личные операции по счёту</h3>
-              <p style={{ fontSize: 12, color: "#77756c", margin: "0 0 8px" }}>Личные операции по счёту — не показаны на графике динамики расходов. Из них «Доход» по-прежнему уменьшает только «Накопление»; снятия и переводы — нет.</p>
+              <p style={{ fontSize: 12, color: "#77756c", margin: "0 0 8px" }}>Снятия, переводы и пополнения — это движение твоих личных денег, а не расход или доход магазина. На «Доход» не влияют.</p>
               {stats.personalWithdrawals.map((x) => (
                 <Row key={x.name} label={x.name} value={x.value} />
               ))}
@@ -501,7 +505,8 @@ function Dashboard({ userId, onSignOut }) {
             </thead>
             <tbody>
               {[...filtered].sort((a, b) => b.date.localeCompare(a.date)).map((e) => {
-                const exp = (e.expenses || []).filter((x) => !PERSONAL_CATEGORIES.includes(x.category)).reduce((s, x) => s + x.amount, 0);
+                const exp = (e.expenses || []).filter((x) => !PERSONAL_CATEGORIES.includes(x.category) && x.category !== "Накопление").reduce((s, x) => s + x.amount, 0);
+                const saving = (e.expenses || []).filter((x) => x.category === "Накопление").reduce((s, x) => s + x.amount, 0);
                 const tax = e.revenue * (settings.taxRate / 100);
                 const isOpen = expandedId === e.id;
                 return (
@@ -515,7 +520,7 @@ function Dashboard({ userId, onSignOut }) {
                       <td style={{ padding: "8px 4px" }}>{e.date}</td>
                       <td className="num" style={{ padding: "8px 4px", textAlign: "right" }}>{money(e.revenue)}</td>
                       <td className="num" style={{ padding: "8px 4px", textAlign: "right", color: RUST }}>{money(exp)}</td>
-                      <td className="num" style={{ padding: "8px 4px", textAlign: "right", fontWeight: 500 }}>{money(e.revenue - exp - tax)}</td>
+                      <td className="num" style={{ padding: "8px 4px", textAlign: "right", fontWeight: 500 }}>{money(e.revenue - exp - tax - saving)}</td>
                       <td style={{ padding: "8px 4px", textAlign: "right", whiteSpace: "nowrap" }}>
                         <button onClick={() => setFormEntry(e)} style={{ background: "none", border: "none", cursor: "pointer", color: "#77756c", marginRight: 6 }} aria-label="Изменить"><Pencil size={14} /></button>
                         <button onClick={() => deleteEntry(e.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#a9a79c" }} aria-label="Удалить"><Trash2 size={14} /></button>
