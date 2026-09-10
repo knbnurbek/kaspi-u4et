@@ -72,24 +72,39 @@ function rangeFor(period, customStart, customEnd) {
 function useCloudStorage(key, initial, userId) {
   const [value, setValue] = useState(initial);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const skipNextSave = useRef(false);
 
   useEffect(() => {
     if (!userId) return;
     let active = true;
+    let attempts = 0;
     setLoaded(false);
-    (async () => {
+    setLoadError(false);
+
+    async function load() {
       const { data, error } = await supabase
         .from("kv")
         .select("value")
         .eq("user_id", userId)
         .eq("key", key)
         .maybeSingle();
-      if (active) {
-        if (!error && data && data.value !== undefined) setValue(data.value);
-        setLoaded(true);
+      if (!active) return;
+      if (error) {
+        attempts++;
+        if (attempts < 5) {
+          setTimeout(load, 1500);
+        } else {
+          // Give up marking this as loaded so we NEVER autosave and overwrite
+          // real cloud data with an empty default after repeated failures.
+          setLoadError(true);
+        }
+        return;
       }
-    })();
+      if (data && data.value != null) setValue(data.value);
+      setLoaded(true);
+    }
+    load();
 
     const channel = supabase
       .channel(`kv-${userId}-${key}`)
@@ -117,12 +132,12 @@ function useCloudStorage(key, initial, userId) {
     return () => clearTimeout(t);
   }, [key, value, loaded, userId]);
 
-  return [value, setValue, loaded];
+  return [value, setValue, loaded, loadError];
 }
 
 function Dashboard({ userId, onSignOut }) {
-  const [entries, setEntries, entriesLoaded] = useCloudStorage("kaspi:entries", [], userId);
-  const [settings, setSettings] = useCloudStorage("kaspi:settings", {
+  const [entries, setEntries, entriesLoaded, entriesError] = useCloudStorage("kaspi:entries", [], userId);
+  const [settings, setSettings, settingsLoaded, settingsError] = useCloudStorage("kaspi:settings", {
     mySalary: 300000,
     employeeSalary: 150000,
     taxRate: 2,
@@ -318,7 +333,20 @@ function Dashboard({ userId, onSignOut }) {
     reader.readAsArrayBuffer(file);
   }
 
-  if (!entriesLoaded) return <div style={{ padding: "2rem", color: "var(--text-secondary, #666)" }}>Загрузка...</div>;
+  if (entriesError || settingsError) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: PAPER, fontFamily: "'Inter', system-ui, sans-serif", padding: "1.5rem", textAlign: "center" }}>
+        <div>
+          <p style={{ color: RUST, fontWeight: 600, marginBottom: 8 }}>Не удалось загрузить данные</p>
+          <p style={{ color: "#77756c", fontSize: 14, marginBottom: 16, maxWidth: 320 }}>
+            Проверь интернет-соединение и обнови страницу. Это специально сделано, чтобы случайно не сохранить пустые данные поверх твоих настоящих.
+          </p>
+          <button className="btn btn-primary" onClick={() => window.location.reload()}>Обновить страницу</button>
+        </div>
+      </div>
+    );
+  }
+  if (!entriesLoaded || !settingsLoaded) return <div style={{ padding: "2rem", color: "var(--text-secondary, #666)" }}>Загрузка...</div>;
 
   return (
     <div style={{ fontFamily: "'Inter', system-ui, sans-serif", background: PAPER, color: INK, minHeight: 400, padding: "1.5rem", borderRadius: 12 }}>
