@@ -69,6 +69,16 @@ function rangeFor(period, customStart, customEnd) {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
+function prevRangeOf(start, end) {
+  const s = new Date(start), e = new Date(end);
+  const dayCount = Math.round((e - s) / 86400000) + 1;
+  const prevEnd = new Date(s);
+  prevEnd.setDate(prevEnd.getDate() - 1);
+  const prevStart = new Date(prevEnd);
+  prevStart.setDate(prevStart.getDate() - (dayCount - 1));
+  return { start: prevStart.toISOString().slice(0, 10), end: prevEnd.toISOString().slice(0, 10) };
+}
+
 function useCloudStorage(key, initial, userId) {
   const [value, setValue] = useState(initial);
   const [loaded, setLoaded] = useState(false);
@@ -95,8 +105,6 @@ function useCloudStorage(key, initial, userId) {
         if (attempts < 5) {
           setTimeout(load, 1500);
         } else {
-          // Give up marking this as loaded so we NEVER autosave and overwrite
-          // real cloud data with an empty default after repeated failures.
           setLoadError(true);
         }
         return;
@@ -135,12 +143,97 @@ function useCloudStorage(key, initial, userId) {
   return [value, setValue, loaded, loadError];
 }
 
+function monthKeyOf(dateStr) {
+  return dateStr.slice(0, 7); // "YYYY-MM"
+}
+
+function getYuanRate(rates, monthKey) {
+  if (!rates || rates.length === 0) return 0;
+  const exact = rates.find((r) => r.month === monthKey);
+  if (exact) return exact.rate;
+  const sorted = [...rates].sort((a, b) => a.month.localeCompare(b.month));
+  let candidate = null;
+  for (const r of sorted) { if (r.month <= monthKey) candidate = r; }
+  return candidate ? candidate.rate : sorted[0].rate;
+}
+
+function computeStats(filtered, settings) {
+  let revenue = 0, businessExpenses = 0, businessExpensesNoPurchase = 0, estimatedGoodsCost = 0;
+  const byCategory = {};
+  const byDate = {};
+  const categorySeries = [];
+  for (const e of filtered) {
+    revenue += e.revenue;
+    let dayExp = 0;
+    let daySaving = 0;
+    const catRow = { date: e.date };
+    for (const x of e.expenses || []) {
+      byCategory[x.category] = (byCategory[x.category] || 0) + x.amount;
+      catRow[x.category] = (catRow[x.category] || 0) + x.amount;
+      if (x.category === "Накопление") {
+        daySaving += x.amount;
+      } else if (!PERSONAL_CATEGORIES.includes(x.category)) {
+        businessExpenses += x.amount;
+        dayExp += x.amount;
+        if (x.category !== "Закуп товара") businessExpensesNoPurchase += x.amount;
+      }
+    }
+    const dayRate = getYuanRate(settings.yuanRates, monthKeyOf(e.date));
+    estimatedGoodsCost += (e.revenue / 200) * (dayRate + 3);
+    const tax = e.revenue * (settings.taxRate / 100);
+    if (tax) catRow["Налог"] = tax;
+    categorySeries.push(catRow);
+    byDate[e.date] = { date: e.date, revenue: e.revenue, net: e.revenue - dayExp - tax - daySaving };
+  }
+  const taxReserve = revenue * (settings.taxRate / 100);
+  const savingsAmount = byCategory["Накопление"] || 0;
+  const purchaseAmount = byCategory["Закуп товара"] || 0;
+  const net = revenue - businessExpenses - taxReserve - savingsAmount;
+  const series = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+  const pie = Object.entries(byCategory).map(([name, value]) => ({ name, value }));
+  if (taxReserve > 0) pie.push({ name: "Налог", value: taxReserve });
+  const catTotals = { ...byCategory };
+  if (taxReserve > 0) catTotals["Налог"] = taxReserve;
+  const categoryNames = Object.keys(catTotals)
+    .filter((c) => !PERSONAL_CATEGORIES.includes(c))
+    .sort((a, b) => catTotals[b] - catTotals[a])
+    .slice(0, 8);
+  const personalWithdrawals = PERSONAL_CATEGORIES
+    .map((name) => ({ name, value: byCategory[name] || 0 }))
+    .filter((x) => x.value !== 0);
+  const expensesNoPurchaseWithTax = businessExpensesNoPurchase + taxReserve;
+  const netByRate = revenue - estimatedGoodsCost - expensesNoPurchaseWithTax;
+  const expensesNoPurchasePercent = revenue > 0 ? (expensesNoPurchaseWithTax * 100) / revenue : 0;
+  let bestDay = null, worstDay = null;
+  for (const d of series) {
+    if (!bestDay || d.net > bestDay.net) bestDay = d;
+    if (!worstDay || d.net < worstDay.net) worstDay = d;
+  }
+  return { revenue, expenses: businessExpenses, taxReserve, savingsAmount, purchaseAmount, net, netByRate, estimatedGoodsCost, expensesNoPurchase: expensesNoPurchaseWithTax, expensesNoPurchasePercent, series, pie, categorySeries: categorySeries.sort((a, b) => a.date.localeCompare(b.date)), categoryNames, personalWithdrawals, bestDay, worstDay };
+}
+
+function detectAnomalies(categorySeries, categoryNames) {
+  const anomalies = [];
+  for (const cat of categoryNames) {
+    const points = categorySeries.filter((r) => r[cat] > 0).map((r) => ({ date: r.date, value: r[cat] }));
+    if (points.length < 3) continue;
+    const avg = points.reduce((s, p) => s + p.value, 0) / points.length;
+    if (avg < 500) continue;
+    for (const p of points) {
+      if (p.value > avg * 1.7) anomalies.push({ date: p.date, category: cat, value: p.value, avg });
+    }
+  }
+  return anomalies.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+}
+
 function Dashboard({ userId, onSignOut }) {
   const [entries, setEntries, entriesLoaded, entriesError] = useCloudStorage("kaspi:entries", [], userId);
   const [settings, setSettings, settingsLoaded, settingsError] = useCloudStorage("kaspi:settings", {
     mySalary: 300000,
     employeeSalary: 150000,
     taxRate: 2,
+    yuanRates: [{ month: todayStr().slice(0, 7), rate: 75 }],
+    monthlyGoal: 500000,
     savings: [
       { name: "Резерв", percent: 50 },
       { name: "Развитие", percent: 30 },
@@ -164,48 +257,27 @@ function Dashboard({ userId, onSignOut }) {
     [entries, start, end]
   );
 
-  const stats = useMemo(() => {
-    let revenue = 0, businessExpenses = 0;
-    const byCategory = {};
-    const byDate = {};
-    const categorySeries = [];
-    for (const e of filtered) {
-      revenue += e.revenue;
-      let dayExp = 0;
-      let daySaving = 0;
-      const catRow = { date: e.date };
-      for (const x of e.expenses || []) {
-        byCategory[x.category] = (byCategory[x.category] || 0) + x.amount;
-        catRow[x.category] = (catRow[x.category] || 0) + x.amount;
-        if (x.category === "Накопление") {
-          daySaving += x.amount;
-        } else if (!PERSONAL_CATEGORIES.includes(x.category)) {
-          businessExpenses += x.amount;
-          dayExp += x.amount;
-        }
-      }
-      const tax = e.revenue * (settings.taxRate / 100);
-      if (tax) catRow["Налог"] = tax;
-      categorySeries.push(catRow);
-      byDate[e.date] = { date: e.date, revenue: e.revenue, net: e.revenue - dayExp - tax - daySaving };
-    }
-    const taxReserve = revenue * (settings.taxRate / 100);
-    const savingsAmount = byCategory["Накопление"] || 0;
-    const net = revenue - businessExpenses - taxReserve - savingsAmount;
-    const series = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
-    const pie = Object.entries(byCategory).map(([name, value]) => ({ name, value }));
-    if (taxReserve > 0) pie.push({ name: "Налог", value: taxReserve });
-    const catTotals = { ...byCategory };
-    if (taxReserve > 0) catTotals["Налог"] = taxReserve;
-    const categoryNames = Object.keys(catTotals)
-      .filter((c) => !PERSONAL_CATEGORIES.includes(c))
-      .sort((a, b) => catTotals[b] - catTotals[a])
-      .slice(0, 8);
-    const personalWithdrawals = PERSONAL_CATEGORIES
-      .map((name) => ({ name, value: byCategory[name] || 0 }))
-      .filter((x) => x.value !== 0);
-    return { revenue, expenses: businessExpenses, taxReserve, savingsAmount, net, series, pie, categorySeries: categorySeries.sort((a, b) => a.date.localeCompare(b.date)), categoryNames, personalWithdrawals };
-  }, [filtered, settings.taxRate, start, end]);
+  const stats = useMemo(() => computeStats(filtered, settings), [filtered, settings]);
+
+  const prevRange = useMemo(() => prevRangeOf(start, end), [start, end]);
+  const prevFiltered = useMemo(
+    () => entries.filter((e) => e.date >= prevRange.start && e.date <= prevRange.end),
+    [entries, prevRange]
+  );
+  const prevStats = useMemo(() => computeStats(prevFiltered, settings), [prevFiltered, settings]);
+
+  const monthRange = useMemo(() => {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { start: start.toISOString().slice(0, 10), end: todayStr() };
+  }, []);
+  const monthFiltered = useMemo(
+    () => entries.filter((e) => e.date >= monthRange.start && e.date <= monthRange.end),
+    [entries, monthRange]
+  );
+  const monthStats = useMemo(() => computeStats(monthFiltered, settings), [monthFiltered, settings]);
+  const goalProgress = settings.monthlyGoal > 0 ? Math.max(0, (monthStats.net / settings.monthlyGoal) * 100) : 0;
+  const anomalies = useMemo(() => detectAnomalies(stats.categorySeries, stats.categoryNames), [stats.categorySeries, stats.categoryNames]);
 
   const distribution = useMemo(() => {
     const fixed = settings.mySalary + settings.employeeSalary;
@@ -217,6 +289,17 @@ function Dashboard({ userId, onSignOut }) {
     }));
     return { fixed, remaining, split };
   }, [stats.net, settings]);
+
+  const distributionByRate = useMemo(() => {
+    const fixed = settings.mySalary + settings.employeeSalary;
+    const remaining = stats.netByRate - fixed;
+    const totalPercent = settings.savings.reduce((s, x) => s + Number(x.percent || 0), 0) || 1;
+    const split = settings.savings.map((s) => ({
+      name: s.name,
+      amount: remaining > 0 ? (remaining * s.percent) / totalPercent : 0,
+    }));
+    return { fixed, remaining, split };
+  }, [stats.netByRate, settings]);
 
   function addEntry(entry) {
     setEntries((prev) => {
@@ -368,11 +451,12 @@ function Dashboard({ userId, onSignOut }) {
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem" }}>
         <div>
           <h1 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Учёт Kaspi-магазина</h1>
-          <p style={{ fontSize: 13, color: "#77756c", margin: "2px 0 0" }}>{start === end ? start : `${start} — ${end}`}</p>
+          <p style={{ fontSize: 13, color: "#77756c", margin: "2px 0 0" }}>{start === end ? start : `${start} — ${end}`} <span style={{ color: "#a9a79c" }}>· сравнение с {prevRange.start === prevRange.end ? prevRange.start : `${prevRange.start} — ${prevRange.end}`}</span></p>
         </div>
         <nav style={{ display: "flex", gap: 18, alignItems: "center" }}>
           <button className={`tab-btn ${tab === "dashboard" ? "active" : ""}`} onClick={() => setTab("dashboard")}><LayoutDashboard size={16} aria-hidden="true" />Обзор</button>
           <button className={`tab-btn ${tab === "history" ? "active" : ""}`} onClick={() => setTab("history")}><History size={16} aria-hidden="true" />История</button>
+          <button className={`tab-btn ${tab === "rate" ? "active" : ""}`} onClick={() => setTab("rate")}><Landmark size={16} aria-hidden="true" />Оценка</button>
           <button className={`tab-btn ${tab === "settings" ? "active" : ""}`} onClick={() => setTab("settings")}><Settings size={16} aria-hidden="true" />Настройки</button>
           <button className="btn" onClick={onSignOut} style={{ marginLeft: 8 }}>Выйти</button>
         </nav>
@@ -409,11 +493,21 @@ function Dashboard({ userId, onSignOut }) {
       {tab === "dashboard" && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0,1fr))", gap: 12, marginBottom: "1.5rem" }}>
-            <StatCard icon={<TrendingUp size={16} color={GREEN} />} label="Выручка" value={stats.revenue} />
-            <StatCard icon={<Wallet size={16} color={RUST} />} label="Расходы" value={stats.expenses} />
+            <StatCard icon={<TrendingUp size={16} color={GREEN} />} label="Выручка" value={stats.revenue} prevValue={prevStats.revenue} />
+            <StatCard icon={<Wallet size={16} color={RUST} />} label="Расходы" value={stats.expenses} prevValue={prevStats.expenses} invert />
             <StatCard icon={<Landmark size={16} color={GOLD} />} label="Налог (резерв)" value={stats.taxReserve} />
             <StatCard icon={<PiggyBank size={16} color={NAVY} />} label="Накопление" value={stats.savingsAmount} />
-            <StatCard icon={<PiggyBank size={16} color={NAVY} />} label="Доход" value={stats.net} bold />
+            <StatCard icon={<PiggyBank size={16} color={NAVY} />} label="Доход" value={stats.net} prevValue={prevStats.net} bold />
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #e8e5da", borderRadius: 8, padding: "1rem 1.25rem", marginBottom: "1.5rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 500, margin: 0 }}>Цель на месяц</h3>
+              <span style={{ fontSize: 13, color: "#77756c" }}>{money(monthStats.net)} из {money(settings.monthlyGoal)} ({goalProgress.toFixed(0)}%)</span>
+            </div>
+            <div style={{ background: "#eeece3", borderRadius: 6, height: 10, overflow: "hidden" }}>
+              <div style={{ width: `${Math.min(100, goalProgress)}%`, background: goalProgress >= 100 ? GREEN : NAVY, height: "100%", borderRadius: 6, transition: "width 0.3s" }} />
+            </div>
           </div>
 
           <div style={{ marginBottom: "1.5rem" }}>
@@ -476,6 +570,30 @@ function Dashboard({ userId, onSignOut }) {
               })()}
             </div>
           </div>
+
+          {(stats.bestDay || anomalies.length > 0) && (
+            <div style={{ display: "grid", gridTemplateColumns: anomalies.length > 0 ? "1fr 1fr" : "1fr", gap: 16, marginBottom: "1.5rem" }}>
+              {stats.bestDay && (
+                <div style={{ background: "#fff", border: "1px solid #e8e5da", borderRadius: 8, padding: "1rem 1.25rem" }}>
+                  <h3 style={{ fontSize: 14, fontWeight: 500, margin: "0 0 8px" }}>Лучший и худший день</h3>
+                  <Row label={`Лучший — ${stats.bestDay.date}`} value={stats.bestDay.net} />
+                  <Row label={`Худший — ${stats.worstDay.date}`} value={stats.worstDay.net} />
+                </div>
+              )}
+              {anomalies.length > 0 && (
+                <div style={{ background: "#fff", border: "1px solid #e8e5da", borderRadius: 8, padding: "1rem 1.25rem" }}>
+                  <h3 style={{ fontSize: 14, fontWeight: 500, margin: "0 0 8px", display: "flex", alignItems: "center", gap: 6 }}>
+                    <AlertTriangle size={14} color={GOLD} aria-hidden="true" />Необычные расходы
+                  </h3>
+                  {anomalies.map((a, i) => (
+                    <p key={i} style={{ fontSize: 12, color: "#52514e", margin: "4px 0" }}>
+                      {a.date} — {a.category}: <span className="num">{money(a.value)}</span> <span style={{ color: "#77756c" }}>(обычно ≈ {money(a.avg)})</span>
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {stats.personalWithdrawals.length > 0 && (
             <div style={{ background: "#fff", border: "1px solid #e8e5da", borderRadius: 8, padding: "1rem 1.25rem", marginBottom: "1.5rem" }}>
@@ -585,6 +703,91 @@ function Dashboard({ userId, onSignOut }) {
         </div>
       )}
 
+      {tab === "rate" && (
+        <div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(0,1fr))", gap: 12, marginBottom: "1.5rem" }}>
+            <StatCard icon={<TrendingUp size={16} color={GREEN} />} label="Выручка" value={stats.revenue} />
+            <StatCard icon={<Wallet size={16} color={RUST} />} label="Расходы (без накопления и закупа, с налогом)" value={stats.expensesNoPurchase} />
+            <StatCard icon={<Wallet size={16} color={RUST} />} label="Доля расходов от выручки" display={`${stats.expensesNoPurchasePercent.toFixed(1)}%`} />
+            <StatCard icon={<Landmark size={16} color={GOLD} />} label="Закуп товара (факт)" value={stats.purchaseAmount} />
+            <StatCard icon={<Landmark size={16} color={GOLD} />} label="Закуп по курсу (оценка)" value={stats.estimatedGoodsCost} />
+            <StatCard icon={<PiggyBank size={16} color={GOLD} />} label="Доход (по курсу)" value={stats.netByRate} bold />
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #e8e5da", borderRadius: 8, padding: "1rem 1.25rem", marginBottom: "1.5rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 500, margin: 0 }}>Курс юаня по месяцам</h3>
+              <button
+                className="btn"
+                onClick={() => {
+                  const nextMonth = todayStr().slice(0, 7);
+                  setSettings((p) => {
+                    const rates = p.yuanRates || [];
+                    if (rates.some((r) => r.month === nextMonth)) return p;
+                    return { ...p, yuanRates: [...rates, { month: nextMonth, rate: rates[rates.length - 1]?.rate || 75 }] };
+                  });
+                }}
+              >
+                <Plus size={13} />Текущий месяц
+              </button>
+            </div>
+            {(settings.yuanRates || []).length === 0 && (
+              <p style={{ fontSize: 13, color: "#77756c", marginBottom: 8 }}>Курс ещё не задан — нажми «+ Текущий месяц», чтобы добавить первую запись.</p>
+            )}
+            {[...(settings.yuanRates || [])].sort((a, b) => b.month.localeCompare(a.month)).map((r) => (
+              <div key={r.month} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+                <input
+                  type="month"
+                  className="field"
+                  style={{ width: 150 }}
+                  value={r.month}
+                  onChange={(e) => {
+                    const newMonth = e.target.value;
+                    setSettings((p) => ({ ...p, yuanRates: (p.yuanRates || []).map((x) => (x.month === r.month ? { ...x, month: newMonth } : x)) }));
+                  }}
+                />
+                <input
+                  type="number"
+                  step="0.1"
+                  className="field"
+                  style={{ width: 110 }}
+                  value={r.rate}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    setSettings((p) => ({ ...p, yuanRates: (p.yuanRates || []).map((x) => (x.month === r.month ? { ...x, rate: val } : x)) }));
+                  }}
+                />
+                <span style={{ fontSize: 13, color: "#77756c" }}>₸ за 1 юань</span>
+                <button
+                  onClick={() => setSettings((p) => ({ ...p, yuanRates: (p.yuanRates || []).filter((x) => x.month !== r.month) }))}
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "#a9a79c" }}
+                ><Trash2 size={14} /></button>
+              </div>
+            ))}
+            <p style={{ fontSize: 12, color: "#77756c", marginTop: 8 }}>
+              Формула на каждый день: (Выручка за день ÷ 200) × (курс месяца + 3). Если для месяца курс не задан — используется ближайший предыдущий известный. «Расходы» здесь — все бизнес-расходы и налог, кроме закупа и накопления.
+            </p>
+          </div>
+
+          <div style={{ background: "#fff", border: "1px solid #e8e5da", borderRadius: 8, padding: "1rem 1.25rem" }}>
+            <h3 style={{ fontSize: 14, fontWeight: 500, margin: "0 0 10px" }}>Распределение примерной чистой прибыли за период</h3>
+            <Row label="Примерная чистая прибыль" value={stats.netByRate} />
+            <Row label={`Оклад: ты`} value={-settings.mySalary} />
+            <Row label={`Оклад: сотрудник`} value={-settings.employeeSalary} />
+            <div className="row-line" style={{ margin: "6px 0" }} />
+            <Row label="Остаток к распределению" value={distributionByRate.remaining} strong />
+            {distributionByRate.remaining < 0 && (
+              <p style={{ fontSize: 13, color: RUST, display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
+                <AlertTriangle size={14} aria-hidden="true" /> За этот период примерной прибыли не хватает на полные оклады.
+              </p>
+            )}
+            {distributionByRate.split.map((s) => (
+              <Row key={s.name} label={`↳ ${s.name}`} value={s.amount} muted />
+            ))}
+          </div>
+        </div>
+      )}
+
       {tab === "settings" && (
         <SettingsPanel settings={settings} setSettings={setSettings} />
       )}
@@ -600,11 +803,26 @@ function Dashboard({ userId, onSignOut }) {
   );
 }
 
-function StatCard({ icon, label, value, bold }) {
+function StatCard({ icon, label, value, bold, display, prevValue, invert }) {
+  let delta = null;
+  if (typeof prevValue === "number") {
+    if (prevValue !== 0) {
+      const pct = ((value - prevValue) / Math.abs(prevValue)) * 100;
+      const goodDirection = invert ? pct <= 0 : pct >= 0;
+      delta = { pct, goodDirection };
+    } else if (value !== 0) {
+      delta = { pct: null, goodDirection: !invert, isNew: true };
+    }
+  }
   return (
     <div style={{ background: "#fff", border: "1px solid #e8e5da", borderRadius: 8, padding: "0.9rem 1rem" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, color: "#77756c", fontSize: 13 }}>{icon}{label}</div>
-      <div className="num" style={{ fontSize: 20, fontWeight: bold ? 600 : 500 }}>{money(value)}</div>
+      <div className="num" style={{ fontSize: 20, fontWeight: bold ? 600 : 500 }}>{display !== undefined ? display : money(value)}</div>
+      {delta && (
+        <div style={{ fontSize: 12, marginTop: 4, color: delta.goodDirection ? GREEN : RUST }}>
+          {delta.isNew ? "новое" : `${delta.pct >= 0 ? "▲" : "▼"} ${Math.abs(delta.pct).toFixed(0)}% к прошлому периоду`}
+        </div>
+      )}
     </div>
   );
 }
@@ -689,7 +907,9 @@ function SettingsPanel({ settings, setSettings }) {
         <label style={{ fontSize: 13, color: "#77756c" }}>Оклад сотруднику, ₸/мес</label>
         <input type="number" className="field" value={local.employeeSalary} onChange={(e) => setLocal((p) => ({ ...p, employeeSalary: Number(e.target.value) }))} style={{ marginTop: 4, marginBottom: 12 }} />
         <label style={{ fontSize: 13, color: "#77756c" }}>Налоговая ставка, %</label>
-        <input type="number" step="0.1" className="field" value={local.taxRate} onChange={(e) => setLocal((p) => ({ ...p, taxRate: Number(e.target.value) }))} style={{ marginTop: 4 }} />
+        <input type="number" step="0.1" className="field" value={local.taxRate} onChange={(e) => setLocal((p) => ({ ...p, taxRate: Number(e.target.value) }))} style={{ marginTop: 4, marginBottom: 12 }} />
+        <label style={{ fontSize: 13, color: "#77756c" }}>Цель по доходу на месяц, ₸</label>
+        <input type="number" className="field" value={local.monthlyGoal} onChange={(e) => setLocal((p) => ({ ...p, monthlyGoal: Number(e.target.value) }))} style={{ marginTop: 4 }} />
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
@@ -770,7 +990,7 @@ function AuthScreen() {
 }
 
 export default function App() {
-  const [session, setSession] = useState(undefined); // undefined = checking, null = signed out, object = signed in
+  const [session, setSession] = useState(undefined);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
