@@ -6,7 +6,7 @@ import {
   PieChart, Pie, Cell, BarChart, Bar, Legend,
 } from "recharts";
 import {
-  Plus, Trash2, Settings, LayoutDashboard, History, Upload,
+  Plus, Trash2, Settings, LayoutDashboard, History, Upload, Download,
   TrendingUp, Wallet, Landmark, PiggyBank, X, AlertTriangle, ChevronDown, Pencil,
 } from "lucide-react";
 
@@ -346,6 +346,37 @@ function Dashboard({ userId, onSignOut }) {
     return { cat: "__UNKNOWN__" };
   }
 
+  function exportBackup() {
+    const rows = [];
+    for (const e of [...entries].sort((a, b) => a.date.localeCompare(b.date))) {
+      rows.push({ Дата: e.date, Категория: "Выручка (продажи)", Сумма: e.revenue });
+      for (const x of e.expenses || []) {
+        rows.push({ Дата: e.date, Категория: x.category, Сумма: x.amount });
+      }
+    }
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, "Данные");
+
+    const settingsRows = [
+      { Параметр: "Оклад тебе, ₸/мес", Значение: settings.mySalary },
+      { Параметр: "Оклад сотруднику, ₸/мес", Значение: settings.employeeSalary },
+      { Параметр: "Налоговая ставка, %", Значение: settings.taxRate },
+      { Параметр: "Делитель выручки в формуле", Значение: settings.revenueDivisor },
+      { Параметр: "Цель по доходу на месяц, ₸", Значение: settings.monthlyGoal },
+    ];
+    for (const r of settings.yuanRates || []) {
+      settingsRows.push({ Параметр: `Курс юаня — ${r.month}`, Значение: r.rate });
+    }
+    for (const s of settings.savings || []) {
+      settingsRows.push({ Параметр: `Распределение остатка — ${s.name}`, Значение: `${s.percent}%` });
+    }
+    const ws2 = XLSX.utils.json_to_sheet(settingsRows);
+    XLSX.utils.book_append_sheet(wb, ws2, "Настройки");
+
+    XLSX.writeFile(wb, `kaspi-backup-${todayStr()}.xlsx`);
+  }
+
   function handleKaspiFile(file) {
     const reader = new FileReader();
     reader.onload = (evt) => {
@@ -483,6 +514,7 @@ function Dashboard({ userId, onSignOut }) {
             </>
           )}
           <div style={{ flex: 1 }} />
+          <button className="btn" onClick={exportBackup} disabled={entries.length === 0}><Download size={14} aria-hidden="true" />Скачать все данные</button>
           <button className="btn" onClick={() => fileInput.current?.click()}><Upload size={14} aria-hidden="true" />Импорт из Kaspi (.xlsx)</button>
           <input ref={fileInput} type="file" accept=".xlsx,.xls" hidden onChange={(e) => e.target.files[0] && handleKaspiFile(e.target.files[0])} />
           <button className="btn btn-primary" onClick={() => setFormEntry("new")}><Plus size={14} aria-hidden="true" />Внести день</button>
