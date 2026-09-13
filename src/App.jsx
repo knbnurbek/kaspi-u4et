@@ -14,6 +14,10 @@ const CATEGORIES = [
   "Закуп товара",
   "Комиссия за продажи (Kaspi)",
   "Доставка",
+  "Доставка с Китая",
+  "Аренда",
+  "За интернет",
+  "За упаковку",
   "Акции и бонусы за отзывы",
   "Возвраты",
   "Реклама",
@@ -110,8 +114,6 @@ function useCloudStorage(key, initial, userId) {
         return;
       }
       if (data && data.value != null) setValue(data.value);
-      // Never let the very first post-load render trigger an autosave —
-      // only genuine subsequent user edits should ever write to the cloud.
       skipNextSave.current = true;
       setLoaded(true);
     }
