@@ -7,6 +7,10 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
+      workbox: {
+        clientsClaim: true,
+        skipWaiting: true,
+      },
       includeAssets: ["icon-192.png", "icon-512.png"],
       manifest: {
         name: "Учёт Kaspi-магазина",
