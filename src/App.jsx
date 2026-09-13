@@ -110,6 +110,8 @@ function useCloudStorage(key, initial, userId) {
         return;
       }
       if (data && data.value != null) setValue(data.value);
+      // Never let the very first post-load render trigger an autosave —
+      // only genuine subsequent user edits should ever write to the cloud.
       skipNextSave.current = true;
       setLoaded(true);
     }
@@ -180,7 +182,7 @@ function computeStats(filtered, settings) {
       }
     }
     const dayRate = getYuanRate(settings.yuanRates, monthKeyOf(e.date));
-    estimatedGoodsCost += (e.revenue / 200) * (dayRate + 3);
+    estimatedGoodsCost += (e.revenue / (settings.revenueDivisor || 200)) * (dayRate + 3);
     const tax = e.revenue * (settings.taxRate / 100);
     if (tax) catRow["Налог"] = tax;
     categorySeries.push(catRow);
@@ -234,6 +236,7 @@ function Dashboard({ userId, onSignOut }) {
     employeeSalary: 150000,
     taxRate: 2,
     yuanRates: [{ month: todayStr().slice(0, 7), rate: 75 }],
+    revenueDivisor: 200,
     monthlyGoal: 500000,
     savings: [
       { name: "Резерв", percent: 50 },
@@ -765,8 +768,19 @@ function Dashboard({ userId, onSignOut }) {
                 ><Trash2 size={14} /></button>
               </div>
             ))}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, marginBottom: 4 }}>
+              <span style={{ fontSize: 13, color: "#77756c" }}>Делитель выручки в формуле:</span>
+              <input
+                type="number"
+                step="1"
+                className="field"
+                style={{ width: 90 }}
+                value={settings.revenueDivisor ?? 200}
+                onChange={(e) => setSettings((p) => ({ ...p, revenueDivisor: Number(e.target.value) }))}
+              />
+            </div>
             <p style={{ fontSize: 12, color: "#77756c", marginTop: 8 }}>
-              Формула на каждый день: (Выручка за день ÷ 200) × (курс месяца + 3). Если для месяца курс не задан — используется ближайший предыдущий известный. «Расходы» здесь — все бизнес-расходы и налог, кроме закупа и накопления.
+              Формула на каждый день: (Выручка за день ÷ {settings.revenueDivisor ?? 200}) × (курс месяца + 3). Если для месяца курс не задан — используется ближайший предыдущий известный. «Расходы» здесь — все бизнес-расходы и налог, кроме закупа и накопления.
             </p>
           </div>
 
