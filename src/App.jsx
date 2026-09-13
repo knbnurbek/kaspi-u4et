@@ -110,6 +110,7 @@ function useCloudStorage(key, initial, userId) {
         return;
       }
       if (data && data.value != null) setValue(data.value);
+      skipNextSave.current = true;
       setLoaded(true);
     }
     load();
